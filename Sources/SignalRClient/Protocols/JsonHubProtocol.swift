@@ -195,19 +195,21 @@ struct JsonHubProtocol: HubProtocol {
     }
 
     private func convertToType(_ anyObject: Any, as targetType: Any.Type) throws -> Any {
-        guard let decodableType = targetType as? Decodable.Type else {
-            throw SignalRError.invalidData("Provided type \(targetType) does not conform to Decodable.")
-        }
-
         // Convert dictionary / array to JSON data
         if (JSONSerialization.isValidJSONObject(anyObject)) {
             guard let jsonData = try? JSONSerialization.data(withJSONObject: anyObject) else {
                 throw SignalRError.invalidData("Failed to serialize to JSON data.")
             }
-
-            let decoder = JSONDecoder()
-            let decodedObject = try decoder.decode(decodableType, from: jsonData)
-            return decodedObject
+            
+            if targetType == Data.self {
+                return jsonData
+            } else if let decodableType = targetType as? Decodable.Type {
+                let decoder = JSONDecoder()
+                let decodedObject = try decoder.decode(decodableType, from: jsonData)
+                return decodedObject
+            } else {
+                throw SignalRError.invalidData("Provided type \(targetType) does not conform to Decodable nor is Data.")
+            }
         }
 
         // primay elements
