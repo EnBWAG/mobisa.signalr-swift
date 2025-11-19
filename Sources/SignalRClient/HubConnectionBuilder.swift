@@ -4,16 +4,16 @@
 import Foundation
 
 public class HubConnectionBuilder {
-    private var connection: HttpConnection?
-    private var logHandler: LogHandler?
-    private var logLevel: LogLevel?
-    private var hubProtocol: HubProtocol?
-    private var serverTimeout: TimeInterval?
-    private var keepAliveInterval: TimeInterval?
-    private var url: String?
-    private var retryPolicy: RetryPolicy?
-    private var statefulReconnectBufferSize: Int?
-    private var httpConnectionOptions: HttpConnectionOptions = HttpConnectionOptions()
+    var connection: HttpConnection?
+    var logHandler: LogHandler?
+    var logLevel: LogLevel?
+    var hubProtocol: HubProtocol?
+    var serverTimeout: TimeInterval?
+    var keepAliveInterval: TimeInterval?
+    var url: String?
+    var retryPolicy: RetryPolicy?
+    var statefulReconnectBufferSize: Int?
+    var httpConnectionOptions: HttpConnectionOptions = HttpConnectionOptions()
 
     public init() {}
 
@@ -30,8 +30,8 @@ public class HubConnectionBuilder {
 
     public func withHubProtocol(hubProtocol: HubProtocolType) -> HubConnectionBuilder {
         switch hubProtocol {
-        case .json:
-            self.hubProtocol = JsonHubProtocol()
+        case let .json(encoder, decoder):
+            self.hubProtocol = JsonHubProtocol(encoder: encoder, decoder: decoder)
         case .messagePack:
             self.hubProtocol = MessagePackHubProtocol()
         }
@@ -117,6 +117,6 @@ public class HubConnectionBuilder {
 }
 
 public enum HubProtocolType {
-    case json
+    case json(JSONEncoder = .init(), JSONDecoder = .init())
     case messagePack
 }
