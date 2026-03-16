@@ -21,7 +21,7 @@ import PackageDescription
 let package = Package(
     name: "signalr-client-app",
     dependencies: [
-        .package(url: "https://github.com/dotnet/signalr-client-swift", .upToNextMinor(from: "1.0.0-preview.4"))
+        .package(url: "https://github.com/dotnet/signalr-client-swift", .upToNextMinor(from: "1.0.0"))
     ],
     targets: [
         .executableTarget(name: "YourTargetName", dependencies: [.product(name: "SignalRClient", package: "signalr-client-swift")])
@@ -268,7 +268,7 @@ let connection = HubConnectionBuilder()
 |---------------------------------|-----------|
 | Azure SignalR Service Support   |✅|
 | Automatic Reconnection          |✅|
-| Stateful Reconnect              ||
+| Stateful Reconnect              |✅|
 | Server to Client Streaming      |✅|
 | Client to Server Streaming      |✅|
 | Long Polling                    |✅|
