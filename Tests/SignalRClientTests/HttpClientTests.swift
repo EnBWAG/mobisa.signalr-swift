@@ -148,6 +148,86 @@ class HttpClientTests: XCTestCase {
             XCTAssertEqual(str, "hello")
         }
     }
+
+    func testAccessTokenHttpClientUsesConnectionFactoryAfterNegotiation() async throws {
+        let mockClient = MockHttpClient()
+        await mockClient.mock(mockId: "post-negotiate") { request in
+            XCTAssertEqual(request.headers["Authorization"], "Bearer connection-token")
+            return (.string("ok"), HttpResponse(statusCode: 200))
+        }
+
+        let request = HttpRequest(
+            mockId: "post-negotiate", method: .GET, url: "https://www.bing.com/chat"
+        )
+
+        let client = AccessTokenHttpClient(
+            innerClient: mockClient,
+            accessTokenFactory: { "negotiate-token" },
+            connectionATFactory: { "connection-token" }
+        )
+
+        let (_, response) = try await client.send(request: request)
+        XCTAssertEqual(response.statusCode, 200)
+    }
+
+    func testAccessTokenHttpClientUsesAccessTokenFactoryForNegotiation() async throws {
+        let mockClient = MockHttpClient()
+        await mockClient.mock(mockId: "negotiate") { request in
+            XCTAssertEqual(request.headers["Authorization"], "Bearer negotiate-token")
+            return (.string("{}"), HttpResponse(statusCode: 200))
+        }
+
+        let request = HttpRequest(
+            mockId: "negotiate", method: .POST,
+            url: "https://www.bing.com/chat/negotiate?negotiateVersion=1"
+        )
+
+        let client = AccessTokenHttpClient(
+            innerClient: mockClient,
+            accessTokenFactory: { "negotiate-token" },
+            connectionATFactory: { "connection-token" }
+        )
+
+        let (_, response) = try await client.send(request: request)
+        XCTAssertEqual(response.statusCode, 200)
+    }
+
+    func testAccessTokenHttpClientRetryUsesAccessTokenFactory() async throws {
+        let mockClient = MockHttpClient()
+        let retryExpectation = XCTestExpectation(description: "Retry should use accessTokenFactory token")
+
+        await mockClient.mock(mockId: "retry-access-token-factory") { request in
+            let authHeader = request.headers["Authorization"]
+
+            if authHeader == "Bearer connection-token" {
+                return (.string(""), HttpResponse(statusCode: 401))
+            }
+
+            if authHeader == "Bearer refreshed-token" {
+                retryExpectation.fulfill()
+                return (.string("hello"), HttpResponse(statusCode: 200))
+            }
+
+            XCTFail("Unexpected Authorization header: \(String(describing: authHeader))")
+            return (.string(""), HttpResponse(statusCode: 401))
+        }
+
+        let request = HttpRequest(
+            mockId: "retry-access-token-factory", method: .GET, url: "https://www.bing.com/chat"
+        )
+
+        let client = AccessTokenHttpClient(
+            innerClient: mockClient,
+            accessTokenFactory: { "refreshed-token" },
+            connectionATFactory: { "connection-token" }
+        )
+
+        let (message, response) = try await client.send(request: request)
+
+        await fulfillment(of: [retryExpectation], timeout: 1)
+        XCTAssertEqual(response.statusCode, 200)
+        XCTAssertEqual(message.convertToString(), "hello")
+    }
 }
 
 extension AccessTokenHttpClient {
