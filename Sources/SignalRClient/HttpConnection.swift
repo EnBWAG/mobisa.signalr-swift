@@ -82,6 +82,7 @@ actor HttpConnection: ConnectionProtocol {
     private var stopTask: Task<Void, Never>?
     private var stopError: Error?
     private var accessTokenFactory: (@Sendable () async throws -> String?)?
+    private var connectionATFactory: (@Sendable () async throws -> String?)?
     private var inherentKeepAlivePrivate: Bool = false
 
     public var features: [ConnectionFeature: Any] = [:]
@@ -111,7 +112,11 @@ actor HttpConnection: ConnectionProtocol {
         self.options.timeout = options.timeout ?? 100
 
         self.accessTokenFactory = options.accessTokenFactory
-        self.httpClient = AccessTokenHttpClient(innerClient: options.httpClient ?? DefaultHttpClient(logger: logger), accessTokenFactory: options.accessTokenFactory)
+        self.httpClient = AccessTokenHttpClient(
+            innerClient: options.httpClient ?? DefaultHttpClient(logger: logger),
+            accessTokenFactory: options.accessTokenFactory,
+            connectionATFactory: nil
+        )
     }
 
     // MARK: - Public Methods
@@ -187,7 +192,8 @@ actor HttpConnection: ConnectionProtocol {
         closeDuringStartError = nil
         
         var url = baseUrl
-        await httpClient.setAccessTokenFactory(factory: accessTokenFactory)
+        connectionATFactory = nil
+        await httpClient.setAccessTokenFactory(accessTokenFactory: accessTokenFactory, connectionATFactory: nil)
 
         do {
             if options.skipNegotiation {
@@ -216,8 +222,8 @@ actor HttpConnection: ConnectionProtocol {
                     if let accessToken = negotiateResponse?.accessToken {
                         // Replace the current access token factory with one that uses
                         // the returned access token
-                        accessTokenFactory = { return accessToken }
-                        await httpClient.setAccessTokenFactory(factory: accessTokenFactory)
+                        connectionATFactory = { return accessToken }
+                        await httpClient.setAccessTokenFactory(accessTokenFactory: accessTokenFactory, connectionATFactory: connectionATFactory)
                     }
                     redirects += 1
                 } while negotiateResponse?.url != nil && redirects < negotiationRedirectionLimit
@@ -487,19 +493,34 @@ actor HttpConnection: ConnectionProtocol {
     private func constructTransport(transport: HttpTransportType) async throws -> Transport {
         switch transport {
         case .webSockets:
+            // After a negotiate redirect (e.g. Azure SignalR Service), connectionATFactory
+            // holds the service-issued token. WebSockets must use that token for the
+            // handshake, not the original MSAL token, otherwise the upgrade is rejected.
             return WebSocketTransport(
-                accessTokenFactory: accessTokenFactory,
+                accessTokenFactory: connectionATFactory ?? accessTokenFactory,
                 logger: logger,
                 headers: options.headers ?? [:]
             )
         case .serverSentEvents:
-            let accessToken = await self.httpClient.accessToken
+            let accessToken = try await getAccessTokenForTransport()
             return ServerSentEventTransport(httpClient: self.httpClient, accessToken: accessToken, logger: logger, options: options)
         case .longPolling:
             return LongPollingTransport(httpClient: httpClient, logger: logger, options: options)
         default:
             throw SignalRError.unsupportedTransport("Unkonwn transport type '\(transport)'.")
         }
+    }
+
+    private func getAccessTokenForTransport() async throws -> String? {
+        if let connectionATFactory = connectionATFactory {
+            return try await connectionATFactory()
+        }
+
+        if let accessTokenFactory = accessTokenFactory {
+            return try await accessTokenFactory()
+        }
+
+        return nil
     }
 
     private func resolveTransportOrError(endpoint: AvailableTransport, requestedTransport: HttpTransportType?, requestedTransferFormat: TransferFormat, useStatefulReconnect: Bool) async -> Any {

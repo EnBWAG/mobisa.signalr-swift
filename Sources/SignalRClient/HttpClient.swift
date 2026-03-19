@@ -99,7 +99,9 @@ typealias AccessTokenFactory = () async throws -> String?
 
 actor AccessTokenHttpClient: HttpClient {
     var accessTokenFactory: AccessTokenFactory?
-    var accessToken: String?
+    var connectionATFactory: AccessTokenFactory?
+    var accessToken: String?           // cached token for accessTokenFactory (negotiate + fallback)
+    var connectionAccessToken: String? // cached token for connectionATFactory (non-negotiate)
     private let innerClient: HttpClient
 
     public init(
@@ -108,23 +110,53 @@ actor AccessTokenHttpClient: HttpClient {
     ) {
         self.innerClient = innerClient
         self.accessTokenFactory = accessTokenFactory
+        self.connectionATFactory = nil
     }
 
-    public func setAccessTokenFactory(factory: AccessTokenFactory?) {
-        self.accessTokenFactory = factory
+    public init(
+        innerClient: HttpClient,
+        accessTokenFactory: AccessTokenFactory?,
+        connectionATFactory: AccessTokenFactory?
+    ) {
+        self.innerClient = innerClient
+        self.accessTokenFactory = accessTokenFactory
+        self.connectionATFactory = connectionATFactory
+    }
+
+    public func setAccessTokenFactory(accessTokenFactory: AccessTokenFactory?, connectionATFactory: AccessTokenFactory?) {
+        self.accessTokenFactory = accessTokenFactory
+        self.connectionATFactory = connectionATFactory
+        self.accessToken = nil
+        self.connectionAccessToken = nil
     }
 
     public func send(request: HttpRequest) async throws -> (
         StringOrData, HttpResponse
     ) {
         var mutableRequest = request
-        var allowRetry = true
+        let isNegotiateRequest = isNegotiateRequest(url: request.url)
+        let allowRetry = !isNegotiateRequest
 
-        if let factory = accessTokenFactory,
-           accessToken == nil || (request.url.contains("/negotiate?")) {
-            // Don't retry if the request is a negotiate or if we just got a potentially new token from the access token factory
-            allowRetry = false
-            accessToken = try await factory()
+        if isNegotiateRequest {
+            if let factory = connectionATFactory {
+                // Redirect negotiate (e.g. Azure SignalR Service): the first negotiate
+                // response returned a redirect URL + access token. The redirect target
+                // only accepts that service-issued token, NOT the original MSAL token.
+                connectionAccessToken = try await factory()
+            } else if let factory = accessTokenFactory {
+                // Initial negotiate: use the caller-supplied token (e.g. MSAL).
+                accessToken = try await factory()
+            }
+        } else {
+            // Non-negotiate uses connectionATFactory when set (token from negotiate response),
+            // falling back to accessTokenFactory. Each factory has its own cache.
+            if let factory = connectionATFactory {
+                if connectionAccessToken == nil {
+                    connectionAccessToken = try await factory()
+                }
+            } else if let factory = accessTokenFactory, accessToken == nil {
+                accessToken = try await factory()
+            }
         }
 
         setAuthorizationHeader(request: &mutableRequest)
@@ -145,10 +177,23 @@ actor AccessTokenHttpClient: HttpClient {
         return (data, httpResponse)
     }
 
+    private func isNegotiateRequest(url: String) -> Bool {
+        guard let urlComponents = URLComponents(string: url) else {
+            return url.lowercased().contains("/negotiate")
+        }
+
+        let path = urlComponents.path.lowercased()
+        return path.hasSuffix("/negotiate") || path.hasSuffix("/negotiate/")
+    }
+
     private func setAuthorizationHeader(request: inout HttpRequest) {
-        if let token = accessToken {
+        // connectionAccessToken takes precedence: it holds the service-issued token
+        // (from a negotiate redirect response), which must be used for both the
+        // redirect negotiate and all subsequent transport requests.
+        let token = connectionAccessToken ?? accessToken
+        if let token {
             request.headers["Authorization"] = "Bearer \(token)"
-        } else if accessTokenFactory != nil {
+        } else if accessTokenFactory != nil || connectionATFactory != nil {
             request.headers.removeValue(forKey: "Authorization")
         }
     }
