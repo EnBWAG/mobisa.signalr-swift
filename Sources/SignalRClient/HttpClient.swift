@@ -100,7 +100,8 @@ typealias AccessTokenFactory = () async throws -> String?
 actor AccessTokenHttpClient: HttpClient {
     var accessTokenFactory: AccessTokenFactory?
     var connectionATFactory: AccessTokenFactory?
-    var accessToken: String?
+    var accessToken: String?           // cached token for accessTokenFactory (negotiate + fallback)
+    var connectionAccessToken: String? // cached token for connectionATFactory (non-negotiate)
     private let innerClient: HttpClient
 
     public init(
@@ -126,6 +127,7 @@ actor AccessTokenHttpClient: HttpClient {
         self.accessTokenFactory = accessTokenFactory
         self.connectionATFactory = connectionATFactory
         self.accessToken = nil
+        self.connectionAccessToken = nil
     }
 
     public func send(request: HttpRequest) async throws -> (
@@ -135,12 +137,24 @@ actor AccessTokenHttpClient: HttpClient {
         let isNegotiateRequest = isNegotiateRequest(url: request.url)
         let allowRetry = !isNegotiateRequest
 
-        if let factory = getFactoryForRequest(isNegotiateRequest: isNegotiateRequest),
-           accessToken == nil || isNegotiateRequest {
-            accessToken = try await factory()
+        if isNegotiateRequest {
+            // Negotiate always uses accessTokenFactory; refresh on every negotiate call
+            if let factory = accessTokenFactory {
+                accessToken = try await factory()
+            }
+        } else {
+            // Non-negotiate uses connectionATFactory when set (token from negotiate response),
+            // falling back to accessTokenFactory. Each factory has its own cache.
+            if let factory = connectionATFactory {
+                if connectionAccessToken == nil {
+                    connectionAccessToken = try await factory()
+                }
+            } else if let factory = accessTokenFactory, accessToken == nil {
+                accessToken = try await factory()
+            }
         }
 
-        setAuthorizationHeader(request: &mutableRequest)
+        setAuthorizationHeader(request: &mutableRequest, isNegotiateRequest: isNegotiateRequest)
 
         var (data, httpResponse) = try await innerClient.send(
             request: mutableRequest)
@@ -148,7 +162,7 @@ actor AccessTokenHttpClient: HttpClient {
         if allowRetry && httpResponse.statusCode == 401,
            let factory = accessTokenFactory {
             accessToken = try await factory()
-            setAuthorizationHeader(request: &mutableRequest)
+            setAuthorizationHeader(request: &mutableRequest, isNegotiateRequest: isNegotiateRequest)
             (data, httpResponse) = try await innerClient.send(
                 request: mutableRequest)
 
@@ -156,14 +170,6 @@ actor AccessTokenHttpClient: HttpClient {
         }
 
         return (data, httpResponse)
-    }
-
-    private func getFactoryForRequest(isNegotiateRequest: Bool) -> AccessTokenFactory? {
-        if isNegotiateRequest {
-            return accessTokenFactory
-        }
-
-        return connectionATFactory ?? accessTokenFactory
     }
 
     private func isNegotiateRequest(url: String) -> Bool {
@@ -175,8 +181,9 @@ actor AccessTokenHttpClient: HttpClient {
         return path.hasSuffix("/negotiate") || path.hasSuffix("/negotiate/")
     }
 
-    private func setAuthorizationHeader(request: inout HttpRequest) {
-        if let token = accessToken {
+    private func setAuthorizationHeader(request: inout HttpRequest, isNegotiateRequest: Bool) {
+        let token = isNegotiateRequest ? accessToken : (connectionAccessToken ?? accessToken)
+        if let token {
             request.headers["Authorization"] = "Bearer \(token)"
         } else if accessTokenFactory != nil || connectionATFactory != nil {
             request.headers.removeValue(forKey: "Authorization")
