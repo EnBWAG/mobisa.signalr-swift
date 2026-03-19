@@ -138,8 +138,13 @@ actor AccessTokenHttpClient: HttpClient {
         let allowRetry = !isNegotiateRequest
 
         if isNegotiateRequest {
-            // Negotiate always uses accessTokenFactory; refresh on every negotiate call
-            if let factory = accessTokenFactory {
+            if let factory = connectionATFactory {
+                // Redirect negotiate (e.g. Azure SignalR Service): the first negotiate
+                // response returned a redirect URL + access token. The redirect target
+                // only accepts that service-issued token, NOT the original MSAL token.
+                connectionAccessToken = try await factory()
+            } else if let factory = accessTokenFactory {
+                // Initial negotiate: use the caller-supplied token (e.g. MSAL).
                 accessToken = try await factory()
             }
         } else {
@@ -154,7 +159,7 @@ actor AccessTokenHttpClient: HttpClient {
             }
         }
 
-        setAuthorizationHeader(request: &mutableRequest, isNegotiateRequest: isNegotiateRequest)
+        setAuthorizationHeader(request: &mutableRequest)
 
         var (data, httpResponse) = try await innerClient.send(
             request: mutableRequest)
@@ -162,7 +167,7 @@ actor AccessTokenHttpClient: HttpClient {
         if allowRetry && httpResponse.statusCode == 401,
            let factory = accessTokenFactory {
             accessToken = try await factory()
-            setAuthorizationHeader(request: &mutableRequest, isNegotiateRequest: isNegotiateRequest)
+            setAuthorizationHeader(request: &mutableRequest)
             (data, httpResponse) = try await innerClient.send(
                 request: mutableRequest)
 
@@ -181,8 +186,11 @@ actor AccessTokenHttpClient: HttpClient {
         return path.hasSuffix("/negotiate") || path.hasSuffix("/negotiate/")
     }
 
-    private func setAuthorizationHeader(request: inout HttpRequest, isNegotiateRequest: Bool) {
-        let token = isNegotiateRequest ? accessToken : (connectionAccessToken ?? accessToken)
+    private func setAuthorizationHeader(request: inout HttpRequest) {
+        // connectionAccessToken takes precedence: it holds the service-issued token
+        // (from a negotiate redirect response), which must be used for both the
+        // redirect negotiate and all subsequent transport requests.
+        let token = connectionAccessToken ?? accessToken
         if let token {
             request.headers["Authorization"] = "Bearer \(token)"
         } else if accessTokenFactory != nil || connectionATFactory != nil {

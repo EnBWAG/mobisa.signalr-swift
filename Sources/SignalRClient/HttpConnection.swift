@@ -493,8 +493,11 @@ actor HttpConnection: ConnectionProtocol {
     private func constructTransport(transport: HttpTransportType) async throws -> Transport {
         switch transport {
         case .webSockets:
+            // After a negotiate redirect (e.g. Azure SignalR Service), connectionATFactory
+            // holds the service-issued token. WebSockets must use that token for the
+            // handshake, not the original MSAL token, otherwise the upgrade is rejected.
             return WebSocketTransport(
-                accessTokenFactory: accessTokenFactory,
+                accessTokenFactory: connectionATFactory ?? accessTokenFactory,
                 logger: logger,
                 headers: options.headers ?? [:]
             )
